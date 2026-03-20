@@ -5,6 +5,7 @@ import '../crypto/varint.dart';
 
 abstract interface class ConnectionIO {
   ByteReader get reader;
+  Stream<Uint8List> get input;
 
   void send(Uint8List bytes);
 

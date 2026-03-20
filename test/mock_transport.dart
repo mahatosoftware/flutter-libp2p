@@ -36,15 +36,15 @@ class MockTcpTransport implements TcpTransport {
     final hostToClient = StreamController<Uint8List>.broadcast();
     
     final clientConn = MockRawConnection(
-      local: Multiaddr([MultiaddrComponent('ip4', '127.0.0.1'), MultiaddrComponent('tcp', '0')]),
-      remote: address,
+      localAddress: Multiaddr([MultiaddrComponent('ip4', '127.0.0.1'), MultiaddrComponent('tcp', '0')]),
+      remoteAddress: address,
       input: hostToClient.stream,
       output: clientToHost,
     );
     
     final hostConn = MockRawConnection(
-      local: address,
-      remote: clientConn.localAddress,
+      localAddress: address,
+      remoteAddress: clientConn.localAddress,
       input: clientToHost.stream,
       output: hostToClient,
     );
@@ -56,9 +56,14 @@ class MockTcpTransport implements TcpTransport {
 
 class MockTcpListener implements TcpListener {
   MockTcpListener(this.address, this.incoming, this._onClose);
+  @override
   final Multiaddr address;
+  @override
   final Stream<RawConnection> incoming;
   final void Function() _onClose;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 
   @override
   Future<void> close() async {
@@ -68,15 +73,23 @@ class MockTcpListener implements TcpListener {
 
 class MockRawConnection implements RawConnection {
   MockRawConnection({required this.localAddress, required this.remoteAddress, required this.input, required this.output});
+  
+  @override
   final Multiaddr localAddress;
+  @override
   final Multiaddr remoteAddress;
+  @override
   final Stream<Uint8List> input;
   final StreamController<Uint8List> output;
 
   @override
-  Future<void> write(Uint8List data) async {
-    output.add(data);
-  }
+  late final ByteReader reader = ByteReader(input);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+
+  @override
+  void send(Uint8List bytes) => output.add(bytes);
 
   @override
   Future<void> close() async {

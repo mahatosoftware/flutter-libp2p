@@ -30,6 +30,22 @@ class PeerId {
   @override
   String toString() => toBase58();
 
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PeerId && _bytesEquals(multihashBytes, other.multihashBytes);
+
+  @override
+  int get hashCode => Object.hashAll(multihashBytes);
+
+  bool _bytesEquals(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+        if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   static Uint8List marshalPublicKey(KeyType type, Uint8List publicKeyBytes) {
     return Uint8List.fromList([
       ...protoEnum(1, type.code),

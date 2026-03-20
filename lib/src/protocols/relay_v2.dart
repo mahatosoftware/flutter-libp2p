@@ -164,8 +164,13 @@ class RelayService implements HostService {
 
           await stream.writeLengthPrefixed(_encodeRelayMessage(_RelayMessage(type: _RelayMessageType.status, status: _RelayStatus.ok)));
 
-          // Pipe data and enforce duration limit
-          _pipe(stream, destStream, duration: const Duration(seconds: defaultLimitSeconds));
+          // Pipe data and enforce duration & data limits
+          _pipe(
+            stream,
+            destStream,
+            duration: const Duration(seconds: defaultLimitSeconds),
+            maxBytes: defaultLimitData,
+          );
         } catch (_) {
           await stream.close();
         }
@@ -205,12 +210,38 @@ class RelayService implements HostService {
     }
   }
 
-  void _pipe(Libp2pStream s1, Libp2pStream s2, {Duration? duration}) {
-    s1.inputStream.listen(s2.write, onDone: s2.close);
-    s2.inputStream.listen(s1.write, onDone: s1.close);
+  void _pipe(
+    Libp2pStream s1,
+    Libp2pStream s2, {
+    Duration? duration,
+    int? maxBytes,
+  }) {
+    int bytes = 0;
     
+    final s1Sub = s1.inputStream.listen((data) {
+      if (maxBytes != null && (bytes + data.length) > maxBytes) {
+        s1.close();
+        s2.close();
+        return;
+      }
+      bytes += data.length;
+      s2.write(data);
+    }, onDone: s2.close);
+    
+    final s2Sub = s2.inputStream.listen((data) {
+      if (maxBytes != null && (bytes + data.length) > maxBytes) {
+        s1.close();
+        s2.close();
+        return;
+      }
+      bytes += data.length;
+      s1.write(data);
+    }, onDone: s1.close);
+
     if (duration != null) {
       Timer(duration, () {
+        s1Sub.cancel();
+        s2Sub.cancel();
         s1.close();
         s2.close();
       });
@@ -236,6 +267,7 @@ class _RelayMessage {
     this.addrs = const <Multiaddr>[],
     this.payload = const <int>[],
     this.status,
+    this.limit,
   });
 
   final _RelayMessageType type;
@@ -244,6 +276,7 @@ class _RelayMessage {
   final List<Multiaddr> addrs;
   final List<int> payload;
   final _RelayStatus? status;
+  final _RelayLimit? limit;
 }
 
 enum _RelayStatus {
@@ -265,8 +298,15 @@ Uint8List _encodeRelayMessage(_RelayMessage message) {
     ...protoEnum(1, message.type.code),
     if (message.peerId != null) ...protoBytes(2, _encodePeer(message.peerId!, message.addrs)),
     if (message.expiry != null) ...protoBytes(3, _encodeReservation(message.expiry!, message.addrs)),
-    // TODO: limit at field 4
+    if (message.limit != null) ...protoBytes(4, _encodeLimit(message.limit!)),
     if (message.status != null) ...protoEnum(5, message.status!.code),
+  ]);
+}
+
+Uint8List _encodeLimit(_RelayLimit limit) {
+  return Uint8List.fromList([
+    if (limit.durationSeconds != null) ...protoVarint(1, limit.durationSeconds!),
+    if (limit.dataBytes != null) ...protoVarint(2, limit.dataBytes!),
   ]);
 }
 
@@ -290,6 +330,7 @@ _RelayMessage _decodeRelayMessage(Uint8List bytes) {
   DateTime? expiry;
   final addrs = <Multiaddr>[];
   _RelayStatus? status;
+  _RelayLimit? limit;
 
   var offset = 0;
   while (offset < bytes.length) {
@@ -331,6 +372,9 @@ _RelayMessage _decodeRelayMessage(Uint8List bytes) {
       final res = _decodeReservation(value);
       expiry = res.expiry;
       addrs.addAll(res.addrs);
+    } else if (fieldNumber == 4) {
+      // Decode Limit
+      limit = _decodeLimit(value);
     }
   }
 
@@ -340,7 +384,24 @@ _RelayMessage _decodeRelayMessage(Uint8List bytes) {
     expiry: expiry,
     addrs: addrs,
     status: status,
+    limit: limit,
   );
+}
+
+_RelayLimit _decodeLimit(Uint8List bytes) {
+  int? duration;
+  int? data;
+  var offset = 0;
+  while (offset < bytes.length) {
+    final field = _readVarint(bytes, offset);
+    offset += field.length;
+    final fieldNumber = field.value >> 3;
+    final val = _readVarint(bytes, offset);
+    offset += val.length;
+    if (fieldNumber == 1) duration = val.value;
+    if (fieldNumber == 2) data = val.value;
+  }
+  return _RelayLimit(durationSeconds: duration, dataBytes: data);
 }
 
 class _KadPeerInfo {

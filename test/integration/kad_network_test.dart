@@ -16,10 +16,14 @@ void main() {
         hosts.add(host);
       }
       
-      // Bootstrap line-style: each node connects to the previous one
+      // Star bootstrap: everyone bootstraps to the first node
+      final bootstrapper = hosts[0].listenAddrs.first;
       for (var i = 1; i < hosts.length; i++) {
-        await hosts[i].kadDht.bootstrap([hosts[i-1].listenAddrs.first]);
+        await hosts[i].kadDht.bootstrap([bootstrapper]);
       }
+      
+      // Wait for background maintenance/discovery to settle
+      await Future<void>.delayed(const Duration(milliseconds: 500));
       
       // Node 20 should be able to find Node 1 through 19 hops maybe?
       // Kademlia should optimize this.
@@ -34,6 +38,9 @@ void main() {
       final testKey = 'test-resource';
       await hosts[0].kadDht.addProvider(testKey, hosts[0].peerId, hosts[0].listenAddrs);
       
+      // Give time for providers to be stored on other nodes (if applicable)
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+
       final providers = await hosts[19].kadDht.findProviders(testKey);
       expect(providers, isNotEmpty);
       expect(providers.any((p) => p.peerId == hosts[0].peerId), isTrue);

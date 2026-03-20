@@ -232,13 +232,16 @@ class _MplexStreamIO implements ConnectionIO {
   final bool initiator;
   final int maxBufferedIncomingBytes;
   final StreamController<Uint8List> _incomingController =
-      StreamController<Uint8List>();
+      StreamController<Uint8List>.broadcast();
   bool _closed = false;
   int _bufferedIncomingBytes = 0;
 
   @override
+  Stream<Uint8List> get input => _incomingController.stream;
+
+  @override
   late final ByteReader reader = ByteReader(
-    _incomingController.stream,
+    input,
     onBytesConsumed: (bytes) {
       _bufferedIncomingBytes -= bytes;
       if (_bufferedIncomingBytes < 0) {

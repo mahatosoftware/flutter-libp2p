@@ -1,5 +1,6 @@
 import '../address/multiaddr.dart';
 import '../identity/peer_id.dart';
+import 'peer_store_storage.dart';
 
 class PeerRecord {
   PeerRecord(this.peerId);
@@ -43,9 +44,19 @@ class ContentProviderRecord {
 }
 
 class PeerStore {
+  PeerStore({PeerStoreStorage? storage}) : _storage = storage ?? InMemoryPeerStorage();
+
+  final PeerStoreStorage _storage;
   final Map<String, PeerRecord> _peers = <String, PeerRecord>{};
   final Map<String, List<ContentProviderRecord>> _providers =
       <String, List<ContentProviderRecord>>{};
+
+  Future<void> init() async {
+    final loaded = await _storage.loadPeers();
+    for (final peer in loaded) {
+      _peers[peer.peerId.toBase58()] = peer;
+    }
+  }
 
   Iterable<PeerRecord> get peers => _peers.values;
 
@@ -63,7 +74,12 @@ class PeerStore {
       record.publicKeyBytes = List<int>.from(publicKeyBytes);
     }
     record.seenNow();
+    _save();
     return record;
+  }
+
+  void _save() {
+    _storage.savePeers(_peers.values.toList());
   }
 
   PeerRecord? getPeer(PeerId peerId) => _peers[peerId.toBase58()];

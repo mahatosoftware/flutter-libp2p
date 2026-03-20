@@ -12,6 +12,7 @@ import '../protocols/multistream_select.dart';
 import '../protocols/noise.dart';
 import '../protocols/ping.dart';
 import '../protocols/relay_v2.dart';
+import '../protocols/dcutr.dart';
 import 'connection_manager.dart';
 import 'peer_store.dart';
 import 'protocol_registry.dart';
@@ -60,6 +61,7 @@ class Libp2pHost {
     required this.protocolRegistry,
     required this.kadDht,
     required this.relay,
+    required this.dcutr,
   });
 
   final Libp2pKeyPair identity;
@@ -72,6 +74,7 @@ class Libp2pHost {
   final ProtocolRegistry protocolRegistry;
   final KadDhtService kadDht;
   final RelayService relay;
+  final DcutrProtocol dcutr;
   final List<Multiaddr> _listenAddrs = <Multiaddr>[];
   final List<TcpListener> _listeners = <TcpListener>[];
 
@@ -90,6 +93,7 @@ class Libp2pHost {
     final protocolRegistry = ProtocolRegistry();
     final kadDht = KadDhtService(actualPeerStore);
     final relay = RelayService(actualPeerStore);
+    final dcutr = DcutrProtocol();
     final host = Libp2pHost._(
       identity: localIdentity,
       peerId: peerId,
@@ -101,6 +105,7 @@ class Libp2pHost {
       protocolRegistry: protocolRegistry,
       kadDht: kadDht,
       relay: relay,
+      dcutr: dcutr,
     );
     await host._registerBuiltins();
     return host;
@@ -127,6 +132,7 @@ class Libp2pHost {
       final connection = await _upgradeIncoming(rawConnection);
       await connectionManager.register(connection);
       peerStore.markConnected(connection.remotePeerId, connection.remoteAddress);
+      kadDht.addPeer(connection.remotePeerId, addr: connection.remoteAddress);
       _serveIncomingStreams(connection);
     });
 
@@ -143,7 +149,13 @@ class Libp2pHost {
     final connection = await _upgradeOutgoing(rawConnection, address);
     await connectionManager.register(connection);
     peerStore.markConnected(connection.remotePeerId, connection.remoteAddress);
+    kadDht.addPeer(connection.remotePeerId, addr: connection.remoteAddress);
     _serveIncomingStreams(connection);
+
+    if (connection.remoteAddress.toString().contains('p2p-circuit')) {
+        unawaited(dcutr.attemptHolePunch(connection));
+    }
+
     return connection;
   }
 
@@ -194,6 +206,7 @@ class Libp2pHost {
     });
     await protocolRegistry.registerService(this, kadDht);
     await protocolRegistry.registerService(this, relay);
+    await protocolRegistry.registerService(this, dcutr);
   }
 
   Future<HostConnection> _upgradeOutgoing(

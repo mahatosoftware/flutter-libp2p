@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -8,6 +9,7 @@ import '../identity/peer_id.dart';
 import '../host/host.dart';
 import '../host/peer_store.dart';
 import '../host/protocol_registry.dart';
+import '../core/retry.dart';
 import 'kad_routing.dart';
 
 enum _KadMessageType {
@@ -40,6 +42,17 @@ class KadDhtService implements HostService {
   final PeerStore peerStore;
   Libp2pHost? _host;
   RoutingTable? _routingTable;
+  Timer? _refreshTimer;
+
+  void addPeer(PeerId peerId, {Multiaddr? addr}) {
+    _routingTable?.addPeer(peerId, addr: addr);
+    if (addr != null && !addr.toString().contains('p2p-circuit')) {
+      peerStore.upsertPeer(peerId, addrs: [addr]);
+    }
+  }
+
+  static const refreshInterval = Duration(minutes: 20);
+  static const maxIdleTime = Duration(hours: 1);
 
   @override
   Iterable<ProtocolRegistration> get protocolRegistrations => <ProtocolRegistration>[
@@ -51,12 +64,15 @@ class KadDhtService implements HostService {
   Future<void> start(Libp2pHost host) async {
     _host = host;
     _routingTable = RoutingTable(host.peerId);
+    _refreshTimer = Timer.periodic(refreshInterval, (_) => _maintain());
   }
 
   @override
   Future<void> stop() async {
     _host = null;
     _routingTable = null;
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
   }
 
   Future<void> bootstrap(Iterable<Multiaddr> peers) async {
@@ -64,21 +80,22 @@ class KadDhtService implements HostService {
     if (host == null) {
       throw StateError('KadDhtService has not been started');
     }
+
     for (final peerAddr in peers) {
-      final peerId = peerAddr.valueForProtocol('p2p');
-      if (peerId == null) {
-        continue;
+      try {
+        await host.connect(peerAddr);
+      } catch (_) {
+        // Skip inaccessible bootstrap nodes
       }
-      peerStore.upsertPeer(
-        PeerId.fromBase58(peerId),
-        addrs: <Multiaddr>[peerAddr],
-      );
     }
+
+    // After connecting to bootstrap nodes, perform a self-search to fill buckets
+    await findPeer(host.peerId);
   }
 
   Future<PeerRecord?> findPeer(PeerId targetPeerId) async {
     final local = peerStore.getPeer(targetPeerId);
-    if (local != null) {
+    if (local != null && targetPeerId.toBase58() != _host?.peerId.toBase58()) {
       return local;
     }
 
@@ -101,21 +118,24 @@ class KadDhtService implements HostService {
         final record = peerStore.getPeer(queryPeer);
         if (record == null || record.addrs.isEmpty) continue;
 
-        final connection = await host.connect(record.addrs.first);
-        final stream = await connection.openStream(protocolId);
-        stream.writeLengthPrefixed(
-          _encodeMessage(
-            _KadMessage(
-              type: _KadMessageType.findNode,
-              key: targetBytes,
+        final response = await Retry.withRetry(() async {
+          final connection = await host.connect(record.addrs.first);
+          final stream = await connection.openStream(protocolId);
+          await stream.writeLengthPrefixed(
+            _encodeMessage(
+              _KadMessage(
+                type: _KadMessageType.findNode,
+                key: targetBytes,
+              ),
             ),
-          ),
-        );
-        final response = _decodeMessage(await stream.readLengthPrefixed());
-        await stream.close();
+          );
+          final res = _decodeMessage(await stream.readLengthPrefixed());
+          await stream.close();
+          return res;
+        }, maxAttempts: 2);
 
         for (final peer in response.closerPeers) {
-          _routingTable?.addPeer(peer.peerId);
+          _routingTable?.addPeer(peer.peerId, addr: peer.addrs.isNotEmpty ? peer.addrs.first : null);
           final record = peerStore.upsertPeer(peer.peerId, addrs: peer.addrs);
           if (record.peerId.toBase58() == targetPeerId.toBase58()) {
             return record;
@@ -179,7 +199,7 @@ class KadDhtService implements HostService {
         await stream.close();
 
         for (final peer in response.providerPeers) {
-          _routingTable?.addPeer(peer.peerId);
+          _routingTable?.addPeer(peer.peerId, addr: peer.addrs.isNotEmpty ? peer.addrs.first : null);
           results[peer.peerId.toBase58()] = peerStore.upsertPeer(
             peer.peerId,
             addrs: peer.addrs,
@@ -187,7 +207,7 @@ class KadDhtService implements HostService {
         }
 
         for (final peer in response.closerPeers) {
-          _routingTable?.addPeer(peer.peerId);
+          _routingTable?.addPeer(peer.peerId, addr: peer.addrs.isNotEmpty ? peer.addrs.first : null);
           peersToQuery.add(peer.peerId);
         }
         peersToQuery.sort((a, b) {
@@ -203,8 +223,47 @@ class KadDhtService implements HostService {
     return results.values.toList(growable: false);
   }
 
-  void addProvider(String key, PeerId peerId, Iterable<Multiaddr> addrs) {
+  Future<void> addProvider(String key, PeerId peerId, Iterable<Multiaddr> addrs) async {
     peerStore.addProvider(key, peerId, addrs: addrs);
+
+    final host = _host;
+    if (host == null) return;
+
+    // 2. Network announcement: find nearest peers to key and tell them
+    final targetBytes = Uint8List.fromList(utf8.encode(key));
+    
+    // We reuse findPeer logic to find nodes to announce to
+    final visitedPeers = <String>{host.peerId.toBase58()};
+    final peersToQuery = _routingTable?.nearestPeers(targetBytes) ?? <PeerId>[];
+
+    while (peersToQuery.isNotEmpty) {
+      final queryPeer = peersToQuery.removeAt(0);
+      if (visitedPeers.contains(queryPeer.toBase58())) continue;
+      visitedPeers.add(queryPeer.toBase58());
+
+      try {
+        final record = peerStore.getPeer(queryPeer);
+        if (record == null || record.addrs.isEmpty) continue;
+
+        final connection = await host.connect(record.addrs.first);
+        final stream = await connection.openStream(protocolId);
+        
+        await stream.writeLengthPrefixed(
+          _encodeMessage(
+            _KadMessage(
+              type: _KadMessageType.addProvider,
+              key: targetBytes,
+              providerPeers: [
+                  KadPeer(peerId: peerId, addrs: addrs.toList()),
+              ],
+            ),
+          ),
+        );
+        await stream.close();
+      } catch (_) {
+        // Continue to others
+      }
+    }
   }
 
   Future<void> _handleKadStream(
@@ -230,19 +289,37 @@ class KadDhtService implements HostService {
           ),
         );
       case _KadMessageType.addProvider:
-        final key = utf8.decode(request.key);
-        peerStore.addProvider(
-          key,
-          connection.remotePeerId,
-          addrs: <Multiaddr>[connection.remoteAddress],
-        );
-        stream.writeLengthPrefixed(
+        String key;
+        try {
+          key = utf8.decode(request.key);
+        } catch (_) {
+          key = base64.encode(request.key);
+        }
+
+        if (request.providerPeers.isNotEmpty) {
+          for (final provider in request.providerPeers) {
+            peerStore.addProvider(key, provider.peerId, addrs: provider.addrs);
+          }
+        } else {
+          peerStore.addProvider(
+            key,
+            connection.remotePeerId,
+            addrs: <Multiaddr>[connection.remoteAddress],
+          );
+        }
+        await stream.writeLengthPrefixed(
           _encodeMessage(
             _KadMessage(type: _KadMessageType.addProvider),
           ),
         );
       case _KadMessageType.getProviders:
-        final key = utf8.decode(request.key);
+        final keyBytes = request.key;
+        String key;
+        try {
+          key = utf8.decode(keyBytes);
+        } catch (_) {
+          key = base64.encode(keyBytes);
+        }
         final providers = peerStore.getProviders(key);
         stream.writeLengthPrefixed(
           _encodeMessage(
@@ -265,6 +342,51 @@ class KadDhtService implements HostService {
         break;
     }
     await stream.close();
+  }
+
+  Future<void> _maintain() async {
+    final routingTable = _routingTable;
+    if (routingTable == null) return;
+
+    // 1. Prune stale peers
+    final now = DateTime.now();
+    for (final bucket in routingTable.buckets) {
+      for (final peerId in bucket.peers.toList()) {
+        final lastSeen = routingTable.lastSeen(peerId);
+        if (lastSeen != null && now.difference(lastSeen) > maxIdleTime) {
+          routingTable.removePeer(peerId);
+          peerStore.markDisconnected(peerId);
+        }
+      }
+    }
+
+    // 2. Refresh buckets
+    // For each bucket that needs refresh, generate a random ID in that range and find it
+    for (var i = 0; i < routingTable.buckets.length; i++) {
+      if (routingTable.buckets.elementAt(i).peers.isEmpty) continue;
+      
+      final randomTarget = _generateRandomTargetInBucketRange(i);
+      await findPeer(PeerId(randomTarget));
+    }
+  }
+
+  Uint8List _generateRandomTargetInBucketRange(int bucketIndex) {
+    // Generate an ID whose XOR distance's bitLength is related to bucketIndex
+    final target = Uint8List(32);
+    final local = _host!.peerId.multihashBytes;
+    
+    // Copy local prefix and modify bits at bucketIndex
+    for (var i = 0; i < 32; i++) {
+        target[i] = local[i];
+    }
+    
+    final byteIdx = bucketIndex ~/ 8;
+    final bitIdx = bucketIndex % 8;
+    if (byteIdx < 32) {
+      target[byteIdx] ^= (1 << bitIdx); // Flip bit to change distance
+      // Randomize remaining low bits?
+    }
+    return target;
   }
 
   List<KadPeer> _nearestPeers(Uint8List target) {

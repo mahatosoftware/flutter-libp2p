@@ -1,16 +1,31 @@
-import 'dart:typed_data';
-
+import '../address/multiaddr.dart';
 import '../identity/peer_id.dart';
 
 class RoutingTable {
-  RoutingTable(this.localPeerId, {this.k = 20});
+  RoutingTable(this.localPeerId, {this.k = 20, this.maxPeersPerIpRange = 2});
 
   final PeerId localPeerId;
   final int k;
+  final int maxPeersPerIpRange;
   final List<KBucket> _buckets = <KBucket>[];
+  final Map<String, DateTime> _lastSeen = <String, DateTime>{};
+  final Map<String, int> _ipRangeCount = <String, int>{};
 
-  void addPeer(PeerId peerId) {
+
+  Iterable<KBucket> get buckets => _buckets;
+
+  void addPeer(PeerId peerId, {Multiaddr? addr}) {
     if (peerId == localPeerId) return;
+
+    final range = addr != null ? _getIpRange(addr) : null;
+    if (range != null) {
+      final count = _ipRangeCount[range] ?? 0;
+      if (count >= maxPeersPerIpRange && !_isPeerInRange(peerId, range)) {
+        return; // Too many peers from this range
+      }
+    }
+
+    _lastSeen[peerId.toBase58()] = DateTime.now();
 
     final distance = xorDistance(localPeerId.multihashBytes, peerId.multihashBytes);
     final bucketIndex = _bucketIndex(distance);
@@ -19,7 +34,50 @@ class RoutingTable {
       _buckets.add(KBucket(k));
     }
 
+    if (!_buckets[bucketIndex].peers.contains(peerId)) {
+        if (range != null) {
+            _ipRangeCount[range] = (_ipRangeCount[range] ?? 0) + 1;
+        }
+    }
     _buckets[bucketIndex].add(peerId);
+  }
+
+  void removePeer(PeerId peerId, {Multiaddr? addr}) {
+    _lastSeen.remove(peerId.toBase58());
+    final range = addr != null ? _getIpRange(addr) : null;
+    if (range != null) {
+        _ipRangeCount[range] = (_ipRangeCount[range] ?? 1) - 1;
+    }
+    for (final bucket in _buckets) {
+      bucket.peers.remove(peerId);
+    }
+  }
+
+  DateTime? lastSeen(PeerId peerId) => _lastSeen[peerId.toBase58()];
+
+  String? _getIpRange(Multiaddr addr) {
+    final ip4 = addr.valueForProtocol('ip4');
+    if (ip4 != null) {
+      final parts = ip4.split('.');
+      if (parts.length == 4) {
+        return 'ip4:${parts[0]}.${parts[1]}.${parts[2]}'; // /24
+      }
+    }
+    final ip6 = addr.valueForProtocol('ip6');
+    if (ip6 != null) {
+        final parts = ip6.split(':');
+        if (parts.length >= 3) {
+            return 'ip6:${parts[0]}:${parts[1]}:${parts[2]}'; // /48
+        }
+    }
+    return null;
+  }
+
+  bool _isPeerInRange(PeerId peerId, String range) {
+      for(final bucket in _buckets) {
+          if (bucket.peers.contains(peerId)) return true;
+      }
+      return false;
   }
 
   List<PeerId> nearestPeers(List<int> targetBytes, {int count = 20}) {
@@ -34,7 +92,7 @@ class RoutingTable {
       return da.compareTo(db);
     });
 
-    return sortedPeers.take(count).toList(growable: false);
+    return sortedPeers.take(count).toList(growable: true);
   }
 
   int _bucketIndex(BigInt distance) {

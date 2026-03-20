@@ -23,7 +23,9 @@ class RawConnection implements ConnectionIO {
   late final StreamSubscription<List<int>> _subscription;
   final StreamController<Uint8List> _incomingController;
   @override
-  late final ByteReader reader = ByteReader(_incomingController.stream);
+  late final Stream<Uint8List> input = _incomingController.stream;
+  @override
+  late final ByteReader reader = ByteReader(input);
 
   @override
   void send(Uint8List bytes) => socket.add(bytes);

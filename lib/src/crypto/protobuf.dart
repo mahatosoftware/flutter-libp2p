@@ -25,3 +25,10 @@ Uint8List protoEnum(int fieldNumber, int value) {
     ...encodeUVarint(value),
   ]);
 }
+
+Uint8List protoVarint(int fieldNumber, int value) {
+  return Uint8List.fromList([
+    ...protoKey(fieldNumber, 0),
+    ...encodeUVarint(value),
+  ]);
+}

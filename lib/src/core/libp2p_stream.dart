@@ -11,6 +11,8 @@ class Libp2pStream {
   final ConnectionIO io;
   final ByteReader reader;
 
+  Stream<Uint8List> get inputStream => io.input;
+
   Future<Uint8List> read(int length) => reader.readExact(length);
 
   Future<Uint8List> readLengthPrefixed() => reader.readLengthPrefixed();
@@ -22,7 +24,7 @@ class Libp2pStream {
 
   void write(List<int> bytes) => io.send(Uint8List.fromList(bytes));
 
-  void writeLengthPrefixed(List<int> bytes) {
+  Future<void> writeLengthPrefixed(List<int> bytes) async {
     write([...encodeUVarint(bytes.length), ...bytes]);
   }
 

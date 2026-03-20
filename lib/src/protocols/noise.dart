@@ -249,7 +249,9 @@ class _NoiseConnection implements ConnectionIO {
   final _NoiseTransportState _transport;
   final StreamController<Uint8List> _incomingController;
   @override
-  late final ByteReader reader = ByteReader(_incomingController.stream);
+  Stream<Uint8List> get input => _incomingController.stream;
+  @override
+  late final ByteReader reader = ByteReader(input);
 
   @override
   void send(Uint8List bytes) {
