@@ -1,0 +1,12 @@
+export 'src/address/multiaddr.dart';
+export 'src/host/host.dart';
+export 'src/host/peer_store.dart';
+export 'src/host/connection_manager.dart';
+export 'src/host/protocol_registry.dart';
+export 'src/host/tcp_transport.dart';
+export 'src/identity/keypair.dart';
+export 'src/identity/peer_id.dart';
+export 'src/protocols/kad_dht.dart';
+export 'src/protocols/identify.dart';
+export 'src/protocols/ping.dart';
+export 'src/protocols/relay_v2.dart';
