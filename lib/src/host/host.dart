@@ -165,6 +165,12 @@ class Libp2pHost {
     await connectionManager.closeAll();
   }
 
+  void handleRelayedStream(PeerId remotePeerId, Libp2pStream stream) {
+    // Treat as any other incoming stream, but we already know the remote peer id
+    // We might want to wrap it in a pseudo-connection
+    _serveNegotiatedStream(remotePeerId, stream);
+  }
+
   Future<void> _registerBuiltins() async {
     handle(PingProtocol.protocolId, (connection, stream) {
       return PingProtocol.serve(stream);
@@ -236,21 +242,42 @@ class Libp2pHost {
 
   void _serveIncomingStreams(HostConnection connection) {
     connection._multiplexer.incomingStreams.listen((stream) async {
-      try {
-        final protocol = await MultistreamSelect.negotiateListener(
-          stream,
-          supportedProtocols,
-        );
-        connection.lastActiveAt = DateTime.now();
-        final handler = protocolRegistry.handlerFor(protocol);
-        if (handler != null) {
+      _serveNegotiatedStream(connection.remotePeerId, stream);
+    });
+  }
+
+  void _serveNegotiatedStream(PeerId remotePeerId, Libp2pStream stream) async {
+    try {
+      final protocol = await MultistreamSelect.negotiateListener(
+        stream,
+        supportedProtocols,
+      );
+      final handler = protocolRegistry.handlerFor(protocol);
+      if (handler != null) {
+        // We need a HostConnection for the handler.
+        // For relayed streams, we might not have a direct HostConnection.
+        // For now, let's try to find an existing one or just use the stream.
+        final connection = connectionManager.connectionFor(remotePeerId);
+        if (connection != null) {
           await handler(connection, stream);
         } else {
-          await stream.close();
+          // If no direct connection, try to find a relayed connection or create a pseudo-connection
+          // For now, let's just create a temporary HostConnection if we have enough info
+          // (Actually, PeerStore should have the address)
+          final record = peerStore.getPeer(remotePeerId);
+          if (record != null && record.addrs.isNotEmpty) {
+            // This is still tricky without a real multiplexer.
+            // For now, skip and just close.
+            await stream.close();
+          } else {
+            await stream.close();
+          }
         }
-      } catch (_) {
+      } else {
         await stream.close();
       }
-    });
+    } catch (_) {
+      await stream.close();
+    }
   }
 }
