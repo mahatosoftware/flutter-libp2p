@@ -39,6 +39,7 @@ class KadDhtService implements HostService {
 
   static const protocolId = '/ipfs/kad/1.0.0';
   static const libp2pProtocolId = '/libp2p/kad/1.0.0';
+  static const int alpha = 3; // Parallelism factor from spec
   final PeerStore peerStore;
   Libp2pHost? _host;
   RoutingTable? _routingTable;
@@ -107,51 +108,48 @@ class KadDhtService implements HostService {
 
     final targetBytes = targetPeerId.multihashBytes;
     final visitedPeers = <String>{host.peerId.toBase58()};
-    final peersToQuery = routingTable.nearestPeers(targetBytes);
-
-    while (peersToQuery.isNotEmpty) {
-      final queryPeer = peersToQuery.removeAt(0);
-      if (visitedPeers.contains(queryPeer.toBase58())) continue;
-      visitedPeers.add(queryPeer.toBase58());
-
-      try {
-        final record = peerStore.getPeer(queryPeer);
-        if (record == null || record.addrs.isEmpty) continue;
-
-        final response = await Retry.withRetry(() async {
-          final connection = await host.connect(record.addrs.first);
-          final stream = await connection.openStream(protocolId);
-          await stream.writeLengthPrefixed(
-            _encodeMessage(
-              _KadMessage(
+    final candidates = routingTable.nearestPeers(targetBytes);
+    
+    while (candidates.isNotEmpty) {
+       // Query up to alpha peers in parallel
+       final toQuery = candidates.take(alpha).toList();
+       candidates.removeRange(0, toQuery.length);
+       
+       final results = await Future.wait(toQuery.map((queryPeer) async {
+           if (visitedPeers.contains(queryPeer.toBase58())) return null;
+           visitedPeers.add(queryPeer.toBase58());
+           
+           try {
+             final record = peerStore.getPeer(queryPeer);
+             if (record == null || record.addrs.isEmpty) return null;
+             
+             final connection = await host.connect(record.addrs.first);
+             final stream = await connection.openStream(protocolId);
+             await stream.writeLengthPrefixed(_encodeMessage(_KadMessage(
                 type: _KadMessageType.findNode,
                 key: targetBytes,
-              ),
-            ),
-          );
-          final res = _decodeMessage(await stream.readLengthPrefixed());
-          await stream.close();
-          return res;
-        }, maxAttempts: 2);
-
-        for (final peer in response.closerPeers) {
-          _routingTable?.addPeer(peer.peerId, addr: peer.addrs.isNotEmpty ? peer.addrs.first : null);
-          final record = peerStore.upsertPeer(peer.peerId, addrs: peer.addrs);
-          if (record.peerId.toBase58() == targetPeerId.toBase58()) {
-            return record;
+             )));
+             final res = _decodeMessage(await stream.readLengthPrefixed());
+             await stream.close();
+             return res;
+           } catch (_) { return null; }
+       }));
+       
+       for (final res in results) {
+          if (res == null) continue;
+          for (final peer in res.closerPeers) {
+             routingTable.addPeer(peer.peerId);
+             if (!visitedPeers.contains(peer.peerId.toBase58())) {
+                candidates.add(peer.peerId);
+             }
+             if (peer.peerId.toBase58() == targetPeerId.toBase58()) {
+                return peerStore.getPeer(peer.peerId);
+             }
           }
-          // Add new peers to the query queue if they are closer
-          // (Simplified: just add all for now, as nearestPeers will prioritize)
-          peersToQuery.add(peer.peerId);
-        }
-        peersToQuery.sort((a, b) {
-          final da = xorDistance(a.multihashBytes, targetBytes);
-          final db = xorDistance(b.multihashBytes, targetBytes);
-          return da.compareTo(db);
-        });
-      } catch (_) {
-        // Log and continue
-      }
+       }
+       candidates.sort((a, b) {
+          return xorDistance(a.multihashBytes, targetBytes).compareTo(xorDistance(b.multihashBytes, targetBytes));
+       });
     }
     return null;
   }

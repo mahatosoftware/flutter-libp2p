@@ -9,7 +9,7 @@ void main() {
     addTearDown(server.close);
     addTearDown(client.close);
 
-    final listenAddr = await server.listen(host: '127.0.0.1', port: 0);
+    final listenAddr = await server.listen(Multiaddr.parse('/ip4/127.0.0.1/tcp/0'));
     final connection = await client.connect(listenAddr);
 
     expect(client.peerStore.getPeer(connection.remotePeerId), isNotNull);
@@ -25,8 +25,8 @@ void main() {
     addTearDown(seeker.close);
     addTearDown(target.close);
 
-    final bootstrapAddr = await bootstrap.listen(host: '127.0.0.1', port: 0);
-    final targetAddr = await target.listen(host: '127.0.0.1', port: 0);
+    final bootstrapAddr = await bootstrap.listen(Multiaddr.parse('/ip4/127.0.0.1/tcp/0'));
+    final targetAddr = await target.listen(Multiaddr.parse('/ip4/127.0.0.1/tcp/0'));
 
     await bootstrap.connect(targetAddr);
     await seeker.connect(bootstrapAddr);
@@ -44,7 +44,7 @@ void main() {
     addTearDown(relay.close);
     addTearDown(client.close);
 
-    final relayAddr = await relay.listen(host: '127.0.0.1', port: 0);
+    final relayAddr = await relay.listen(Multiaddr.parse('/ip4/127.0.0.1/tcp/0'));
     final connection = await client.connect(relayAddr);
     final reservation = await client.relay.reserve(connection);
 

@@ -7,7 +7,7 @@ import 'package:flutter_libp2p/src/core/transport.dart';
 import 'package:flutter_libp2p/src/host/tcp_transport.dart';
 
 class MockTcpTransport implements Transport {
-  final _listeners = <String, StreamController<RawConnection>>{};
+  final _listeners = <String, StreamController<ConnectionIO>>{};
 
   @override
   bool canDial(Multiaddr address) {
@@ -21,7 +21,7 @@ class MockTcpTransport implements Transport {
     final key = '$host:$port';
     if (_listeners.containsKey(key)) throw StateError('port already in use');
     
-    final controller = StreamController<RawConnection>.broadcast();
+    final controller = StreamController<ConnectionIO>.broadcast();
     _listeners[key] = controller;
     
     return MockTcpListener(
@@ -32,7 +32,7 @@ class MockTcpTransport implements Transport {
   }
 
   @override
-  Future<RawConnection> dial(Multiaddr address) async {
+  Future<ConnectionIO> dial(Multiaddr address) async {
     final host = address.valueForProtocol('ip4') ?? '0.0.0.0';
     final port = address.valueForProtocol('tcp')!;
     final key = '$host:$port';
@@ -67,7 +67,7 @@ class MockTcpListener implements ConnectionListener {
   @override
   final Multiaddr address;
   @override
-  final Stream<RawConnection> incoming;
+  final Stream<ConnectionIO> incoming;
   final void Function() _onClose;
 
   @override
@@ -76,7 +76,7 @@ class MockTcpListener implements ConnectionListener {
   }
 }
 
-class MockRawConnection implements RawConnection {
+class MockRawConnection implements ConnectionIO {
   MockRawConnection({required this.localAddress, required this.remoteAddress, required this.input, required this.output});
   
   final Multiaddr localAddress;

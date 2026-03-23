@@ -25,7 +25,6 @@ import '../protocols/multistream_select.dart';
 import 'connection_manager.dart';
 import 'peer_store.dart';
 import 'protocol_registry.dart';
-import '../core/transport.dart';
 import 'tcp_transport.dart';
 import 'quic_transport.dart';
 import 'webrtc_transport.dart';
@@ -141,7 +140,7 @@ class Libp2pHost {
     final mdns = MdnsDiscovery(peerId: peerId);
     host.discoveryServices.add(mdns);
     mdns.events.listen((event) {
-        // Automatically add discovered peers to DHT and PeerStore
+        print('Discovered peer: ${event.peerId} at ${event.addrs}');
         for (final addr in event.addrs) {
             host.kadDht.addPeer(event.peerId, addr: addr);
         }
@@ -156,6 +155,19 @@ class Libp2pHost {
 
   void handle(String protocolId, StreamHandler handler) {
     protocolRegistry.registerHandler(protocolId, handler);
+  }
+
+  Future<HostConnection> connectToPeer(PeerId peerId) async {
+    final record = peerStore.getPeer(peerId);
+    if (record == null || record.addrs.isEmpty) {
+      // 1. Try to find peer in DHT
+      final found = await kadDht.findPeer(peerId);
+      if (found == null || found.addrs.isEmpty) {
+        throw StateError('could not find address for peer: ${peerId.toBase58()}');
+      }
+      return connect(found.addrs.first);
+    }
+    return connect(record.addrs.first);
   }
 
   Future<Multiaddr> listen(Multiaddr address) async {

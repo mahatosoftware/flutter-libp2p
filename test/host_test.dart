@@ -9,7 +9,7 @@ void main() {
     addTearDown(server.close);
     addTearDown(client.close);
 
-    final listenAddr = await server.listen(host: '127.0.0.1', port: 0);
+    final listenAddr = await server.listen(Multiaddr.parse('/ip4/127.0.0.1/tcp/0'));
     final connection = await client.connect(listenAddr);
 
     final latency = await client.ping(connection);

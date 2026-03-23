@@ -72,8 +72,10 @@ class MplexConnection implements StreamMuxer {
   int _nextStreamId = 0;
   bool _closed = false;
 
+  @override
   Stream<MplexStream> get incomingStreams => _incomingController.stream;
 
+  @override
   Future<MplexStream> openStream([String name = 'stream']) async {
     _ensureOpen();
     if (_streams.length >= _limits.maxOpenStreams) {

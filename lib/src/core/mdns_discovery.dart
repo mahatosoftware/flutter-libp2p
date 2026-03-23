@@ -91,8 +91,6 @@ class MdnsDiscovery implements DiscoveryService {
     // Basic DNS parser to find p2p mentions
     final text = utf8.decode(data, allowMalformed: true);
     if (text.contains('dnsaddr=')) {
-        // Find p2p ID and addresses
-        final p2pIdx = text.indexOf('p2p='); // Alternatively use the instance name
         // (This is a simplified parser for simulation, real one would parse DNS records)
     }
   }
@@ -117,6 +115,7 @@ class MdnsDiscovery implements DiscoveryService {
     _announce();
   }
 
+  @override
   Future<void> stop() async {
     _announceTimer?.cancel();
     _socket?.close();
