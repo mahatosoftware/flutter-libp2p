@@ -10,6 +10,13 @@ class MultistreamSelect {
     Libp2pStream stream,
     String protocol,
   ) async {
+    await negotiateInitiatorMulti(stream, [protocol]);
+  }
+
+  static Future<String> negotiateInitiatorMulti(
+    Libp2pStream stream,
+    List<String> protocols,
+  ) async {
     stream.writeLengthPrefixedString(handshake);
     final remoteHandshake = await stream
         .readLengthPrefixedString()
@@ -18,13 +25,20 @@ class MultistreamSelect {
       throw StateError('unexpected multistream handshake: $remoteHandshake');
     }
 
-    stream.writeLengthPrefixed(utf8.encode('$protocol\n'));
-    final response = await stream
-        .readLengthPrefixedString()
-        .timeout(negotiationTimeout);
-    if (response != '$protocol\n') {
-      throw StateError('remote rejected protocol $protocol with: $response');
+    for (final protocol in protocols) {
+      final p = protocol.endsWith('\n') ? protocol : '$protocol\n';
+      stream.writeLengthPrefixedString(p);
+      final response = await stream
+          .readLengthPrefixedString()
+          .timeout(negotiationTimeout);
+      if (response == p) {
+        return protocol;
+      }
+      if (response != 'na\n') {
+        throw StateError('remote rejected protocol $protocol with: $response');
+      }
     }
+    throw StateError('remote rejected all protocols: $protocols');
   }
 
   static Future<String> negotiateListener(

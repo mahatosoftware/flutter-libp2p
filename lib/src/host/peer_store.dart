@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import '../address/multiaddr.dart';
 import '../identity/peer_id.dart';
 import 'peer_store_storage.dart';
@@ -57,6 +59,11 @@ class PeerStore {
       _peers[peer.peerId.toBase58()] = peer;
     }
   }
+
+  // DHT KV Storage
+  final Map<String, Uint8List> _values = <String, Uint8List>{};
+  Uint8List? getValue(String key) => _values[key];
+  void putValue(String key, Uint8List value) => _values[key] = value;
 
   Iterable<PeerRecord> get peers => _peers.values;
 

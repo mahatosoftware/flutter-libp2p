@@ -89,9 +89,9 @@ class RelayService implements HostService {
       ),
     );
     final response = _decodeRelayMessage(await stream.readLengthPrefixed());
-    if (response.type != _RelayMessageType.status) {
+    if (response.type != _RelayMessageType.status || response.status != _RelayStatus.ok) {
       await stream.close();
-      throw StateError('relay connection failed: ${response.type}');
+      throw StateError('relay connection failed: ${response.status}');
     }
     return stream;
   }

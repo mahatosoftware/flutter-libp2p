@@ -36,7 +36,7 @@ void main() {
     final host = await Libp2pHost.create();
     addTearDown(host.close);
 
-    final listenAddr = await host.listen(host: '127.0.0.1', port: 0);
+    final listenAddr = await host.listen(Multiaddr.parse('/ip4/127.0.0.1/tcp/0'));
     final result = await Process.run(
       'go',
       ['run', '.', 'client', listenAddr.toString()],

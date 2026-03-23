@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import '../core/connection_io.dart';
 import '../core/libp2p_stream.dart';
 import '../crypto/varint.dart';
+import '../core/muxer.dart';
 
 enum _MplexFlag {
   newStream(0),
@@ -54,7 +55,8 @@ class MplexStream extends Libp2pStream {
   Future<void> close() => _io.close();
 }
 
-class MplexConnection {
+
+class MplexConnection implements StreamMuxer {
   MplexConnection(this._io, {MplexLimits limits = const MplexLimits()})
     : _reader = _io.reader,
       _incomingController = StreamController<MplexStream>.broadcast(),

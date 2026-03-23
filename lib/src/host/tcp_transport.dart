@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import '../address/multiaddr.dart';
 import '../core/connection_io.dart';
+import '../core/transport.dart';
 
 class RawConnection implements ConnectionIO {
   RawConnection(this.socket)
@@ -41,7 +42,7 @@ class RawConnection implements ConnectionIO {
   );
 }
 
-class TcpListener {
+class TcpListener implements ConnectionListener {
   TcpListener(this.serverSocket)
     : _incomingController = StreamController<RawConnection>.broadcast() {
     _subscription = serverSocket.listen(
@@ -59,27 +60,36 @@ class TcpListener {
   final StreamController<RawConnection> _incomingController;
   late final StreamSubscription<Socket> _subscription;
 
+  @override
   Stream<RawConnection> get incoming => _incomingController.stream;
 
+  @override
   Multiaddr get address => Multiaddr.parse(
     '/ip4/${serverSocket.address.address}/tcp/${serverSocket.port}',
   );
 
+  @override
   Future<void> close() async {
     await _subscription.cancel();
     await serverSocket.close();
   }
 }
 
-class TcpTransport {
-  Future<TcpListener> listen({
-    String host = '0.0.0.0',
-    required int port,
-  }) async {
+class TcpTransport implements Transport {
+  @override
+  bool canDial(Multiaddr address) {
+    return address.valueForProtocol('tcp') != null;
+  }
+
+  @override
+  Future<TcpListener> listen(Multiaddr address) async {
+    final host = address.valueForProtocol('ip4') ?? '0.0.0.0';
+    final port = int.parse(address.valueForProtocol('tcp') ?? '0');
     final serverSocket = await ServerSocket.bind(host, port);
     return TcpListener(serverSocket);
   }
 
+  @override
   Future<RawConnection> dial(Multiaddr address) async {
     final host =
         address.valueForProtocol('ip4') ??

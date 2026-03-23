@@ -15,10 +15,17 @@ class _Protocol {
 const _protocolsByName = <String, _Protocol>{
   'ip4': _Protocol('ip4', 0x04, 32),
   'tcp': _Protocol('tcp', 0x06, 16),
+  'udp': _Protocol('udp', 0x0111, 16),
   'dns4': _Protocol('dns4', 0x36, -1),
   'dns6': _Protocol('dns6', 0x37, -1),
   'dnsaddr': _Protocol('dnsaddr', 0x38, -1),
   'ip6': _Protocol('ip6', 0x29, 128),
+  'quic': _Protocol('quic', 0x01cc, 0),
+  'quic-v1': _Protocol('quic-v1', 0x01cd, 0),
+  'webrtc': _Protocol('webrtc', 0x0119, 0),
+  'webrtc-direct': _Protocol('webrtc-direct', 0x0118, 0),
+  'certhash': _Protocol('certhash', 0x01de, -1),
+  'p2p-circuit': _Protocol('p2p-circuit', 0x0122, 0),
   'p2p': _Protocol('p2p', 0x01a5, -1),
 };
 
@@ -157,6 +164,7 @@ class Multiaddr {
         }
         return Uint8List.fromList(parts.map(int.parse).toList(growable: false));
       case 'tcp':
+      case 'udp':
         final port = int.parse(value);
         return Uint8List.fromList([(port >> 8) & 0xff, port & 0xff]);
       case 'ip6':
@@ -171,6 +179,7 @@ class Multiaddr {
       case 'ip4':
         return raw.join('.');
       case 'tcp':
+      case 'udp':
         final port = (raw[0] << 8) | raw[1];
         return '$port';
       case 'ip6':
@@ -188,6 +197,8 @@ class Multiaddr {
         return Uint8List.fromList(utf8.encode(value));
       case 'p2p':
         return decodeBase58(value);
+      case 'certhash':
+        return decodeBase58(value);
       default:
         throw FormatException('unsupported variable-size protocol: $protocol');
     }
@@ -200,6 +211,8 @@ class Multiaddr {
       case 'dnsaddr':
         return utf8.decode(raw);
       case 'p2p':
+        return encodeBase58(Uint8List.fromList(raw));
+      case 'certhash':
         return encodeBase58(Uint8List.fromList(raw));
       default:
         throw FormatException('unsupported variable-size protocol: $protocol');

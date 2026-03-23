@@ -26,12 +26,28 @@ class IdentifySnapshot {
 
 class IdentifyProtocol {
   static const protocolId = '/ipfs/id/1.0.0';
+  static const identifyPushProtocolId = '/ipfs/id/push/1.0.0';
 
   static Future<void> writeMessage(
     Libp2pStream stream,
     IdentifySnapshot snapshot,
   ) async {
-    final bytes = <int>[
+    await _writeIdent(stream, snapshot);
+    await stream.close();
+  }
+
+  static Future<void> writeIdentifyPush(
+    Libp2pStream stream,
+    IdentifySnapshot snapshot,
+  ) async {
+    await _writeIdent(stream, snapshot);
+    // Identify push doesn't always close immediately if multiplexed?
+    // But usually it's one-off per stream.
+    await stream.close();
+  }
+
+  static Future<void> _writeIdent(Libp2pStream stream, IdentifySnapshot snapshot) async {
+     final bytes = <int>[
       ...protoString(5, snapshot.protocolVersion),
       ...protoString(6, snapshot.agentVersion),
       ...protoBytes(1, snapshot.publicKey),
@@ -41,7 +57,6 @@ class IdentifyProtocol {
       for (final protocol in snapshot.protocols) ...protoString(3, protocol),
     ];
     stream.writeLengthPrefixed(bytes);
-    await stream.close();
   }
 
   static Future<IdentifySnapshot> readMessage(Libp2pStream stream) async {

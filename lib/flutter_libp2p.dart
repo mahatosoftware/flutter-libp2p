@@ -1,4 +1,5 @@
 export 'src/address/multiaddr.dart';
+export 'src/core/libp2p_stream.dart';
 export 'src/host/host.dart';
 export 'src/host/peer_store.dart';
 export 'src/host/connection_manager.dart';

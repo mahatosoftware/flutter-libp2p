@@ -3,13 +3,21 @@ import 'dart:typed_data';
 
 import 'package:flutter_libp2p/src/address/multiaddr.dart';
 import 'package:flutter_libp2p/src/core/connection_io.dart';
+import 'package:flutter_libp2p/src/core/transport.dart';
 import 'package:flutter_libp2p/src/host/tcp_transport.dart';
 
-class MockTcpTransport implements TcpTransport {
+class MockTcpTransport implements Transport {
   final _listeners = <String, StreamController<RawConnection>>{};
 
   @override
-  Future<TcpListener> listen({String host = '0.0.0.0', required int port}) async {
+  bool canDial(Multiaddr address) {
+    return address.valueForProtocol('tcp') != null;
+  }
+
+  @override
+  Future<ConnectionListener> listen(Multiaddr address) async {
+    final host = address.valueForProtocol('ip4') ?? '0.0.0.0';
+    final port = address.valueForProtocol('tcp')!;
     final key = '$host:$port';
     if (_listeners.containsKey(key)) throw StateError('port already in use');
     
@@ -17,7 +25,7 @@ class MockTcpTransport implements TcpTransport {
     _listeners[key] = controller;
     
     return MockTcpListener(
-      Multiaddr([MultiaddrComponent('ip4', host), MultiaddrComponent('tcp', port.toString())]),
+      Multiaddr([MultiaddrComponent('ip4', host), MultiaddrComponent('tcp', port)]),
       controller.stream,
       () => _listeners.remove(key),
     );
@@ -54,16 +62,13 @@ class MockTcpTransport implements TcpTransport {
   }
 }
 
-class MockTcpListener implements TcpListener {
+class MockTcpListener implements ConnectionListener {
   MockTcpListener(this.address, this.incoming, this._onClose);
   @override
   final Multiaddr address;
   @override
   final Stream<RawConnection> incoming;
   final void Function() _onClose;
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 
   @override
   Future<void> close() async {
@@ -74,9 +79,7 @@ class MockTcpListener implements TcpListener {
 class MockRawConnection implements RawConnection {
   MockRawConnection({required this.localAddress, required this.remoteAddress, required this.input, required this.output});
   
-  @override
   final Multiaddr localAddress;
-  @override
   final Multiaddr remoteAddress;
   @override
   final Stream<Uint8List> input;
@@ -84,9 +87,6 @@ class MockRawConnection implements RawConnection {
 
   @override
   late final ByteReader reader = ByteReader(input);
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 
   @override
   void send(Uint8List bytes) => output.add(bytes);

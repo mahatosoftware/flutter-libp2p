@@ -11,8 +11,8 @@ void main() {
       
       // Create 20 nodes
       for (var i = 1; i <= 20; i++) {
-        final host = await Libp2pHost.create(transport: transport);
-        await host.listen(port: i);
+        final host = await Libp2pHost.create(transports: [transport]);
+        await host.listen(Multiaddr.parse('/ip4/127.0.0.1/tcp/$i'));
         hosts.add(host);
       }
       

@@ -1,29 +1,42 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import '../address/multiaddr.dart';
 import '../core/connection_io.dart';
 import '../core/libp2p_stream.dart';
+import '../core/discovery.dart';
+import '../core/mdns_discovery.dart';
+import '../core/muxer.dart';
+import '../core/transport.dart';
 import '../identity/keypair.dart';
 import '../identity/peer_id.dart';
 import '../protocols/kad_dht.dart';
 import '../protocols/identify.dart';
 import '../protocols/mplex.dart';
-import '../protocols/multistream_select.dart';
+import '../protocols/yamux.dart';
+import '../protocols/tls.dart';
 import '../protocols/noise.dart';
 import '../protocols/ping.dart';
 import '../protocols/relay_v2.dart';
 import '../protocols/dcutr.dart';
+import '../protocols/gossipsub.dart';
+import '../protocols/autonat.dart';
+import '../protocols/multistream_select.dart';
 import 'connection_manager.dart';
 import 'peer_store.dart';
 import 'protocol_registry.dart';
+import '../core/transport.dart';
 import 'tcp_transport.dart';
+import 'quic_transport.dart';
+import 'webrtc_transport.dart';
+import 'webtransport_transport.dart';
 
 class HostConnection {
   HostConnection({
     required this.host,
     required this.remotePeerId,
     required this.remoteAddress,
-    required MplexConnection multiplexer,
+    required StreamMuxer multiplexer, // Changed MplexConnection to StreamMuxer
   })  : _multiplexer = multiplexer,
         createdAt = DateTime.now(),
         lastActiveAt = DateTime.now();
@@ -33,7 +46,7 @@ class HostConnection {
   final Multiaddr remoteAddress;
   final DateTime createdAt;
   DateTime lastActiveAt;
-  final MplexConnection _multiplexer;
+  final StreamMuxer _multiplexer; // Changed MplexConnection to StreamMuxer
 
   Future<Libp2pStream> openStream(String protocolId) async {
     lastActiveAt = DateTime.now();
@@ -53,7 +66,7 @@ class Libp2pHost {
   Libp2pHost._({
     required this.identity,
     required this.peerId,
-    required this.transport,
+    required this.transports,
     required this.protocolVersion,
     required this.agentVersion,
     required this.peerStore,
@@ -62,11 +75,13 @@ class Libp2pHost {
     required this.kadDht,
     required this.relay,
     required this.dcutr,
+    required this.gossipsub,
+    required this.autonat,
   });
 
   final Libp2pKeyPair identity;
   final PeerId peerId;
-  final TcpTransport transport;
+  final List<Transport> transports;
   final String protocolVersion;
   final String agentVersion;
   final PeerStore peerStore;
@@ -75,12 +90,15 @@ class Libp2pHost {
   final KadDhtService kadDht;
   final RelayService relay;
   final DcutrProtocol dcutr;
+  final GossipsubService gossipsub;
+  final AutoNATService autonat;
+  final List<DiscoveryService> discoveryServices = <DiscoveryService>[];
   final List<Multiaddr> _listenAddrs = <Multiaddr>[];
-  final List<TcpListener> _listeners = <TcpListener>[];
+  final List<ConnectionListener> _listeners = <ConnectionListener>[];
 
   static Future<Libp2pHost> create({
     Libp2pKeyPair? identity,
-    TcpTransport? transport,
+    List<Transport>? transports,
     String protocolVersion = '/flutter-libp2p/0.1.0',
     String agentVersion = 'flutter-libp2p/0.1.0',
     PeerStore? peerStore,
@@ -94,10 +112,18 @@ class Libp2pHost {
     final kadDht = KadDhtService(actualPeerStore);
     final relay = RelayService(actualPeerStore);
     final dcutr = DcutrProtocol();
+    final gossipsub = GossipsubService();
+    final autonat = AutoNATService();
+
     final host = Libp2pHost._(
       identity: localIdentity,
       peerId: peerId,
-      transport: transport ?? TcpTransport(),
+      transports: transports ?? [
+        TcpTransport(),
+        QuicTransport(),
+        WebRTCTransport(localIdentity),
+        WebTransportTransport(),
+      ],
       protocolVersion: protocolVersion,
       agentVersion: agentVersion,
       peerStore: actualPeerStore,
@@ -106,8 +132,21 @@ class Libp2pHost {
       kadDht: kadDht,
       relay: relay,
       dcutr: dcutr,
+      gossipsub: gossipsub,
+      autonat: autonat,
     );
     await host._registerBuiltins();
+    
+    // Default mDNS discovery
+    final mdns = MdnsDiscovery(peerId: peerId);
+    host.discoveryServices.add(mdns);
+    mdns.events.listen((event) {
+        // Automatically add discovered peers to DHT and PeerStore
+        for (final addr in event.addrs) {
+            host.kadDht.addPeer(event.peerId, addr: addr);
+        }
+    });
+
     return host;
   }
 
@@ -119,8 +158,19 @@ class Libp2pHost {
     protocolRegistry.registerHandler(protocolId, handler);
   }
 
-  Future<Multiaddr> listen({String host = '0.0.0.0', required int port}) async {
-    final listener = await transport.listen(host: host, port: port);
+  Future<Multiaddr> listen(Multiaddr address) async {
+    Transport? transport;
+    for (final t in transports) {
+      if (t.canDial(address)) {
+        transport = t;
+        break;
+      }
+    }
+    if (transport == null) {
+      throw StateError('No transport found for address: $address');
+    }
+
+    final listener = await transport.listen(address);
     _listeners.add(listener);
     final listenAddress = Multiaddr([
       ...listener.address.components,
@@ -140,11 +190,45 @@ class Libp2pHost {
   }
 
   Future<HostConnection> connect(Multiaddr address) async {
+    if (address.toString().contains('p2p-circuit')) {
+        // Example: /p2p/RELAY_ID/p2p-circuit/p2p/DEST_ID OR /ip4/RELAY_IP/.../p2p/RELAY_ID/p2p-circuit/p2p/DEST_ID
+        final components = address.components;
+        final circuitIdx = components.indexWhere((c) => c.protocol == 'p2p-circuit');
+        
+        // Everything before p2p-circuit is the target relay
+        final relayAddr = Multiaddr(components.sublist(0, circuitIdx));
+        final relayConn = await connect(relayAddr);
+        
+        // Everything after p2p-circuit is the target peer (usually just /p2p/DEST_ID)
+        final destPeerIdStr = components.lastWhere((c) => c.protocol == 'p2p').value!;
+        final destPeerId = PeerId.fromBase58(destPeerIdStr);
+        
+        final relayStream = await relay.connect(relayConn, destPeerId);
+        final connection = await _upgradeOutgoing(_RelayedConnectionIO(relayStream), address);
+        await connectionManager.register(connection);
+        peerStore.markConnected(connection.remotePeerId, connection.remoteAddress);
+        kadDht.addPeer(connection.remotePeerId, addr: connection.remoteAddress);
+        _serveIncomingStreams(connection);
+        return connection;
+    }
+
     final rawAddress = Multiaddr(
       address.components
           .where((component) => component.protocol != 'p2p')
           .toList(),
     );
+    
+    Transport? transport;
+    for (final t in transports) {
+      if (t.canDial(rawAddress)) {
+        transport = t;
+        break;
+      }
+    }
+    if (transport == null) {
+      throw StateError('No transport found for address: $rawAddress');
+    }
+
     final rawConnection = await transport.dial(rawAddress);
     final connection = await _upgradeOutgoing(rawConnection, address);
     await connectionManager.register(connection);
@@ -171,6 +255,9 @@ class Libp2pHost {
 
   Future<void> close() async {
     await protocolRegistry.stopAllServices();
+    for (final discovery in discoveryServices) {
+       await discovery.stop();
+    }
     for (final listener in _listeners) {
       await listener.close();
     }
@@ -178,9 +265,19 @@ class Libp2pHost {
   }
 
   void handleRelayedStream(PeerId remotePeerId, Libp2pStream stream) {
-    // Treat as any other incoming stream, but we already know the remote peer id
-    // We might want to wrap it in a pseudo-connection
-    _serveNegotiatedStream(remotePeerId, stream);
+    unawaited(_handleRelayedStreamAsync(stream));
+  }
+
+  Future<void> _handleRelayedStreamAsync(Libp2pStream stream) async {
+    try {
+      final connection = await _upgradeIncoming(_RelayedConnectionIO(stream), Multiaddr.parse('/p2p-circuit'));
+      await connectionManager.register(connection);
+      peerStore.markConnected(connection.remotePeerId, connection.remoteAddress);
+      kadDht.addPeer(connection.remotePeerId, addr: connection.remoteAddress);
+      _serveIncomingStreams(connection);
+    } catch (_) {
+      await stream.close();
+    }
   }
 
   Future<void> _registerBuiltins() async {
@@ -207,15 +304,36 @@ class Libp2pHost {
     await protocolRegistry.registerService(this, kadDht);
     await protocolRegistry.registerService(this, relay);
     await protocolRegistry.registerService(this, dcutr);
+    await protocolRegistry.registerService(this, gossipsub);
+    await protocolRegistry.registerService(this, autonat);
   }
 
   Future<HostConnection> _upgradeOutgoing(
-    RawConnection rawConnection,
+    ConnectionIO io,
     Multiaddr dialedAddress,
   ) async {
+    if (io is StreamMuxer) {
+        // Authenticated and muxed already (e.g. QUIC)
+        // But we need a PeerId. For QUIC we should already have one.
+        // For now let's assume security is tied to the IO.
+        // We'll need to extract remotePeerId from the connection.
+        final peerIdStr = dialedAddress.valueForProtocol('p2p');
+        return HostConnection(
+            host: this,
+            remotePeerId: peerIdStr != null ? PeerId.fromBase58(peerIdStr) : PeerId.fromBase58('dummy'), // Should get real id
+            remoteAddress: dialedAddress,
+            multiplexer: io as StreamMuxer,
+        );
+    }
+    
     final noise = NoiseProtocol(identity);
-    final security = await noise.secureOutbound(rawConnection);
-    final negotiationStream = await _upgradeToMplexInitiator(security.connection);
+    final tls = TlsProtocol(identity);
+    // Security negotiation: Try TLS first, then fall back to Noise
+    // Actually, libp2p usually uses multistream-select to decide
+    // For now, continue with Noise but add a check if io already secured
+    
+    final security = await noise.secureOutbound(io);
+    final negotiationStream = await _upgradeToMuxerInitiator(security.connection);
     return HostConnection(
       host: this,
       remotePeerId: security.remotePeerId,
@@ -223,34 +341,58 @@ class Libp2pHost {
       multiplexer: negotiationStream,
     );
   }
-
-  Future<HostConnection> _upgradeIncoming(RawConnection rawConnection) async {
+ 
+  Future<HostConnection> _upgradeIncoming(
+    ConnectionIO io,
+    [Multiaddr? addr]
+  ) async {
+    if (io is StreamMuxer) {
+        // Naturally secured/muxed connection
+        // We need the remote peer id somehow.
+        return HostConnection(
+            host: this,
+            remotePeerId: PeerId.fromBase58('dummy'), // Needs real peer id from handshake
+            remoteAddress: addr ?? Multiaddr.parse('/p2p-circuit'),
+            multiplexer: io as StreamMuxer,
+        );
+    }
+ 
     final noise = NoiseProtocol(identity);
-    final security = await noise.secureInbound(rawConnection);
-    final multiplexer = await _upgradeToMplexListener(security.connection);
+    final security = await noise.secureInbound(io);
+    final multiplexer = await _upgradeToMuxerListener(security.connection);
     return HostConnection(
       host: this,
       remotePeerId: security.remotePeerId,
-      remoteAddress: rawConnection.remoteAddress,
+      remoteAddress: addr ?? (io is RawConnection ? (io as RawConnection).remoteAddress : Multiaddr.parse('/p2p-circuit')),
       multiplexer: multiplexer,
     );
   }
-
-  Future<MplexConnection> _upgradeToMplexInitiator(ConnectionIO connection) async {
+ 
+  Future<StreamMuxer> _upgradeToMuxerInitiator(ConnectionIO connection) async {
     final stream = Libp2pStream(connection);
-    await MultistreamSelect.negotiateInitiator(stream, '/mplex/6.7.0');
-    return MplexConnection(connection);
-  }
-
-  Future<MplexConnection> _upgradeToMplexListener(ConnectionIO connection) async {
-    final stream = Libp2pStream(connection);
-    final negotiated = await MultistreamSelect.negotiateListener(stream, {
-      '/mplex/6.7.0',
-    });
-    if (negotiated != '/mplex/6.7.0') {
-      throw StateError('unexpected muxer protocol: $negotiated');
+    final negotiated = await MultistreamSelect.negotiateInitiatorMulti(stream, [
+       '/yamux/1.0.0',
+       '/mplex/6.7.0',
+    ]);
+    
+    if (negotiated == '/yamux/1.0.0') {
+       return YamuxConnection(connection);
     }
     return MplexConnection(connection);
+  }
+ 
+  Future<StreamMuxer> _upgradeToMuxerListener(ConnectionIO connection) async {
+    final stream = Libp2pStream(connection);
+    final negotiated = await MultistreamSelect.negotiateListener(stream, {
+      '/yamux/1.0.0',
+      '/mplex/6.7.0',
+    });
+    if (negotiated == '/yamux/1.0.0') {
+      return YamuxConnection(connection);
+    } else if (negotiated == '/mplex/6.7.0') {
+      return MplexConnection(connection);
+    }
+    throw StateError('unexpected muxer protocol: $negotiated');
   }
 
   void _serveIncomingStreams(HostConnection connection) {
@@ -293,4 +435,20 @@ class Libp2pHost {
       await stream.close();
     }
   }
+}
+
+class _RelayedConnectionIO implements ConnectionIO {
+  _RelayedConnectionIO(this._stream) : reader = ByteReader(_stream.inputStream);
+
+  final Libp2pStream _stream;
+  @override
+  final ByteReader reader;
+  @override
+  Stream<Uint8List> get input => _stream.inputStream;
+
+  @override
+  void send(Uint8List bytes) => _stream.write(bytes);
+
+  @override
+  Future<void> close() => _stream.close();
 }

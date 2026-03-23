@@ -229,10 +229,7 @@ class KadDhtService implements HostService {
     final host = _host;
     if (host == null) return;
 
-    // 2. Network announcement: find nearest peers to key and tell them
     final targetBytes = Uint8List.fromList(utf8.encode(key));
-    
-    // We reuse findPeer logic to find nodes to announce to
     final visitedPeers = <String>{host.peerId.toBase58()};
     final peersToQuery = _routingTable?.nearestPeers(targetBytes) ?? <PeerId>[];
 
@@ -260,9 +257,75 @@ class KadDhtService implements HostService {
           ),
         );
         await stream.close();
-      } catch (_) {
-        // Continue to others
-      }
+      } catch (_) {}
+    }
+  }
+
+  Future<Uint8List?> getValue(String key) async {
+    final local = peerStore.getValue(key);
+    if (local != null) return local;
+
+    final host = _host;
+    final routingTable = _routingTable;
+    if (host == null || routingTable == null) throw StateError('DHT not started');
+
+    final targetBytes = Uint8List.fromList(utf8.encode(key));
+    final visitedPeers = <String>{host.peerId.toBase58()};
+    final peersToQuery = routingTable.nearestPeers(targetBytes);
+
+    while (peersToQuery.isNotEmpty) {
+      final queryPeer = peersToQuery.removeAt(0);
+      if (visitedPeers.contains(queryPeer.toBase58())) continue;
+      visitedPeers.add(queryPeer.toBase58());
+
+      try {
+        final record = peerStore.getPeer(queryPeer);
+        if (record == null || record.addrs.isEmpty) continue;
+
+        final connection = await host.connect(record.addrs.first);
+        final stream = await connection.openStream(protocolId);
+        await stream.writeLengthPrefixed(_encodeMessage(_KadMessage(
+          type: _KadMessageType.getValue,
+          key: targetBytes,
+        )));
+        final response = _decodeMessage(await stream.readLengthPrefixed());
+        await stream.close();
+
+        if (response.record != null) {
+           peerStore.putValue(key, response.record!);
+           return response.record;
+        }
+
+        for (final peer in response.closerPeers) {
+           routingTable.addPeer(peer.peerId);
+           peersToQuery.add(peer.peerId);
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  Future<void> putValue(String key, Uint8List value) async {
+    peerStore.putValue(key, value);
+    final host = _host;
+    if (host == null) return;
+
+    final targetBytes = Uint8List.fromList(utf8.encode(key));
+    final peersToUpdate = _routingTable?.nearestPeers(targetBytes, count: 20) ?? [];
+    
+    for (final peerId in peersToUpdate) {
+       try {
+           final record = peerStore.getPeer(peerId);
+           if (record == null || record.addrs.isEmpty) continue;
+           final connection = await host.connect(record.addrs.first);
+           final stream = await connection.openStream(protocolId);
+           await stream.writeLengthPrefixed(_encodeMessage(_KadMessage(
+              type: _KadMessageType.putValue,
+              key: targetBytes,
+              record: value,
+           )));
+           await stream.close();
+       } catch (_) {}
     }
   }
 
@@ -337,8 +400,20 @@ class KadDhtService implements HostService {
           ),
         );
       case _KadMessageType.putValue:
+        final key = utf8.decode(request.key, allowMalformed: true);
+        if (request.record != null) peerStore.putValue(key, request.record!);
+        await stream.writeLengthPrefixed(_encodeMessage(_KadMessage(type: _KadMessageType.putValue)));
       case _KadMessageType.getValue:
+        final key = utf8.decode(request.key, allowMalformed: true);
+        final value = peerStore.getValue(key);
+        final peers = _nearestPeers(Uint8List.fromList(request.key));
+        await stream.writeLengthPrefixed(_encodeMessage(_KadMessage(
+          type: _KadMessageType.getValue,
+          record: value,
+          closerPeers: peers,
+        )));
       case _KadMessageType.ping:
+        await stream.writeLengthPrefixed(_encodeMessage(_KadMessage(type: _KadMessageType.ping)));
         break;
     }
     await stream.close();
@@ -409,18 +484,21 @@ class _KadMessage {
     this.key = const <int>[],
     this.closerPeers = const <KadPeer>[],
     this.providerPeers = const <KadPeer>[],
+    this.record,
   });
 
   final _KadMessageType type;
   final List<int> key;
   final List<KadPeer> closerPeers;
   final List<KadPeer> providerPeers;
+  final Uint8List? record;
 }
 
 Uint8List _encodeMessage(_KadMessage message) {
   return Uint8List.fromList([
     ...protoEnum(1, message.type.code),
     if (message.key.isNotEmpty) ...protoBytes(3, message.key),
+    if (message.record != null) ...protoBytes(4, message.record!),
     for (final peer in message.closerPeers) ...protoBytes(8, _encodePeer(peer)),
     for (final peer in message.providerPeers) ...protoBytes(9, _encodePeer(peer)),
   ]);
@@ -436,6 +514,7 @@ Uint8List _encodePeer(KadPeer peer) {
 _KadMessage _decodeMessage(Uint8List bytes) {
   _KadMessageType type = _KadMessageType.findNode;
   List<int> key = const <int>[];
+  Uint8List? record;
   final closerPeers = <KadPeer>[];
   final providerPeers = <KadPeer>[];
 
@@ -465,6 +544,8 @@ _KadMessage _decodeMessage(Uint8List bytes) {
     offset += length.value;
     if (fieldNumber == 3) {
       key = value;
+    } else if (fieldNumber == 4) {
+      record = value;
     } else if (fieldNumber == 8) {
       closerPeers.add(_decodePeer(value));
     } else if (fieldNumber == 9) {
@@ -475,6 +556,7 @@ _KadMessage _decodeMessage(Uint8List bytes) {
   return _KadMessage(
     type: type,
     key: key,
+    record: record,
     closerPeers: closerPeers,
     providerPeers: providerPeers,
   );

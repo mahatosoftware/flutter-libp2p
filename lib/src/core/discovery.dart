@@ -4,6 +4,7 @@ import '../identity/peer_id.dart';
 abstract class DiscoveryService {
   Stream<DiscoveryEvent> get events;
   void announce(String ns, List<Multiaddr> addrs);
+  Future<void> stop();
 }
 
 class DiscoveryEvent {
