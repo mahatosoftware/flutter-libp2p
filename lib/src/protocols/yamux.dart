@@ -20,6 +20,24 @@ class YamuxFlags {
   static const ack = 1 << 1;
   static const fin = 1 << 2;
   static const rst = 1 << 3;
+
+  const YamuxFlags({this.isAck = false, this.isSyn = false, this.isFin = false, this.isRst = false});
+  final bool isAck;
+  final bool isSyn;
+  final bool isFin;
+  final bool isRst;
+
+  int get value => (isAck ? ack : 0) | (isSyn ? syn : 0) | (isFin ? fin : 0) | (isRst ? rst : 0);
+}
+
+class YamuxLimits {
+  const YamuxLimits({
+    this.initialWindowSize = 256 * 1024,
+    this.maxWindowSize = 256 * 1024 * 1024, // 256MB for now
+  });
+
+  final int initialWindowSize;
+  final int maxWindowSize;
 }
 
 class YamuxFrame {
