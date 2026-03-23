@@ -29,6 +29,7 @@ import 'tcp_transport.dart';
 import 'quic_transport.dart';
 import 'webrtc_transport.dart';
 import 'webtransport_transport.dart';
+import 'udx_transport.dart';
 
 class HostConnection {
   HostConnection({
@@ -119,6 +120,7 @@ class Libp2pHost {
       peerId: peerId,
       transports: transports ?? [
         TcpTransport(),
+        UdxTransport(),
         QuicTransport(),
         WebRTCTransport(localIdentity),
         WebTransportTransport(),

@@ -27,6 +27,7 @@ const _protocolsByName = <String, _Protocol>{
   'certhash': _Protocol('certhash', 0x01de, -1),
   'p2p-circuit': _Protocol('p2p-circuit', 0x0122, 0),
   'p2p': _Protocol('p2p', 0x01a5, -1),
+  'udx': _Protocol('udx', 0x0112, 16),
 };
 
 final _protocolsByCode = <int, _Protocol>{
@@ -165,6 +166,7 @@ class Multiaddr {
         return Uint8List.fromList(parts.map(int.parse).toList(growable: false));
       case 'tcp':
       case 'udp':
+      case 'udx':
         final port = int.parse(value);
         return Uint8List.fromList([(port >> 8) & 0xff, port & 0xff]);
       case 'ip6':
@@ -180,6 +182,7 @@ class Multiaddr {
         return raw.join('.');
       case 'tcp':
       case 'udp':
+      case 'udx':
         final port = (raw[0] << 8) | raw[1];
         return '$port';
       case 'ip6':
